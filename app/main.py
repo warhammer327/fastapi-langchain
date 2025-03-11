@@ -1,9 +1,8 @@
-import os
 import requests
 from fastapi import FastAPI, HTTPException
+import os
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST")
-
 app = FastAPI(title="Tragic End")
 
 

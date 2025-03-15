@@ -1,17 +1,17 @@
 import asyncio
 import os
+import traceback
 from typing import List, Optional
 
-import numpy as np
 import requests
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from langchain_community.llms import Ollama
-from nomic import embed
 from pgvector.sqlalchemy import Vector
 from pydantic import BaseModel
-from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine, func
+from sqlalchemy import Column, DateTime, Integer, Text, cast, create_engine, func, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.sql.expression import literal
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
@@ -50,7 +50,7 @@ class EmbeddingRespose(BaseModel):
 
 class SimilarityQuery(BaseModel):
     query: str
-    limit: Optional[int] = 5
+    limit: Optional[int] = 2
 
 
 app = FastAPI(title="Tragic End")
@@ -197,4 +197,69 @@ async def create_embedding(text_input: TextInput, db: Session = Depends(get_db))
         print(f"Error creating embedding: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Error creating embedding: {str(e)}"
+        )
+
+
+@app.post("/search", response_model=List[dict])
+async def semantic_search(
+    similarity_query: SimilarityQuery, db: Session = Depends(get_db)
+):
+    try:
+        query_text = similarity_query.query
+        limit = similarity_query.limit
+
+        # Generate embedding for the query using the same Ollama model
+        ollama_url = f"{OLLAMA_HOST}/api/embeddings"
+        payload = {"model": "nomic-embed-text:latest", "prompt": query_text}
+        response = requests.post(ollama_url, json=payload)
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Ollama embeddings error: {response.text}",
+            )
+
+        # Extract the embedding vector from the response
+        embedding_data = response.json()
+        query_vector = embedding_data.get("embedding", [])
+
+        # Using PostgreSQL's l2_distance function
+        # We'll use raw SQL for this as it's more straightforward with pgvector
+        query = f"""
+        SELECT 
+            id, 
+            content, 
+            created_at, 
+            1 - (embedding <=> '{query_vector}'::vector) as similarity
+        FROM 
+            text_embeddings
+        ORDER BY 
+            embedding <=> '{query_vector}'::vector
+        LIMIT 
+            {limit}
+        """
+
+        # Execute the raw query
+        results = db.execute(text(query)).fetchall()
+
+        # Format the results
+        formatted_results = [
+            {
+                "id": result[0],
+                "content": result[1],
+                "created_at": str(result[2]),
+                "similarity": float(
+                    result[3]
+                ),  # Convert to float for JSON serialization
+            }
+            for result in results
+        ]
+
+        return formatted_results
+
+    except Exception as e:
+        print(f"Error performing semantic search: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, detail=f"Error performing semantic search: {str(e)}"
         )

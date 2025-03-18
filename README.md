@@ -1,1 +1,2 @@
-do `docker compose up` in root.
+- do `docker compose up` in root.
+- goto ollama, pull gemma and nomic.
